@@ -101,7 +101,7 @@ async def disburse_salaries(
             salary = 0.0
         amount_kobo = int(round(salary * 100))
 
-        transaction_reference = f"GB-{upload_id[:8]}-{emp_id[:8]}"
+        transaction_reference = f"SBRZKCZRQ2_{upload_id[:8]}_{emp_id[:8]}"
         bank_code = str(emp.get("bank_code") or emp.get("bank_name") or "").strip()
         account_number = str(emp.get("bank_account") or "").strip()
 
@@ -168,7 +168,7 @@ async def disburse_salaries(
                 {
                     "employee_id": emp_id,
                     "employee_name": emp.get("name", "") or "",
-                    "transaction_reference": f"GB-{upload_id[:8]}-{emp_id[:8]}",
+                    "transaction_reference": f"SBRZKCZRQ2_{upload_id[:8]}_{emp_id[:8]}",
                     "amount_naira": float(emp.get("salary") or 0),
                     "success": False,
                     "status": "error",
