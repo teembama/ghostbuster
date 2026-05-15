@@ -34,7 +34,11 @@ class DatabaseService:
     async def save_employees(self, upload_id: str, employees: List[Dict]):
         for emp in employees:
             emp["upload_id"] = upload_id
-        self.client.table("employees").insert(employees).execute()
+        # Fixed (batches of 1000):
+        batch_size = 1000
+        for i in range(0, len(employees), batch_size):
+            batch = employees[i:i + batch_size]
+            self.client.table("employees").insert(batch).execute()
 
     async def get_analysis_result(self, upload_id: str) -> Optional[Dict]:
         response = self.client.table("analysis_results").select("*").eq("upload_id", upload_id).execute()
