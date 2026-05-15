@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { toast } from "sonner";
 import {
   Ghost,
   CloudUpload,
@@ -96,13 +97,15 @@ export default function UploadPage() {
   const validateAndSet = useCallback((f: File) => {
     setError(null);
     if (!f.name.toLowerCase().endsWith(".csv")) {
-      setError(
-        `"${f.name}" is not a CSV file. Only .csv files are accepted for analysis.`
-      );
+      const msg = `"${f.name}" is not a CSV file. Only .csv files are accepted.`;
+      setError(msg);
+      toast.error("Invalid file type", { description: msg });
       return;
     }
     if (f.size > 50 * 1024 * 1024) {
-      setError("File exceeds the 50 MB limit. Please split the payroll data.");
+      const msg = "File exceeds the 50 MB limit. Please split the payroll data.";
+      setError(msg);
+      toast.error("File too large", { description: msg });
       return;
     }
     setFile(f);
@@ -152,12 +155,15 @@ export default function UploadPage() {
       setProgress(100);
       setCurrentStep(3);
       setPhase("done");
+      toast.success("Analysis complete", {
+        description: "Fraud report is ready. Navigate to Results to view flagged records.",
+      });
     } catch (err) {
       clearInterval(timerRef.current!);
-      setError(
-        err instanceof Error ? err.message : "Analysis failed. Please retry."
-      );
+      const message = err instanceof Error ? err.message : "Analysis failed. Please retry.";
+      setError(message);
       setPhase("error");
+      toast.error("Analysis failed", { description: message });
     }
   };
 

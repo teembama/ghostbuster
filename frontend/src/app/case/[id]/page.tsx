@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
+import { toast } from "sonner";
 import dynamic from "next/dynamic";
 
 const FraudNetworkGraph = dynamic(
@@ -287,9 +288,32 @@ export default function CasePage() {
     escalate: "idle",
   });
 
+  const ACTION_TOAST: Record<string, { title: string; description: string }> = {
+    ghost: {
+      title: "Marked as Ghost Worker",
+      description: `${EMPLOYEE.name} has been flagged. Action logged to audit trail.`,
+    },
+    clear: {
+      title: "Employee Cleared",
+      description: `${EMPLOYEE.name} has been verified and cleared for payroll.`,
+    },
+    escalate: {
+      title: "Escalated to ICPC",
+      description: `Case for ${EMPLOYEE.name} has been forwarded to the ICPC for investigation.`,
+    },
+  };
+
   function handleAction(key: string) {
     setActionStates((s) => ({ ...s, [key]: "loading" }));
-    setTimeout(() => setActionStates((s) => ({ ...s, [key]: "done" })), 1400);
+    setTimeout(() => {
+      setActionStates((s) => ({ ...s, [key]: "done" }));
+      const { title, description } = ACTION_TOAST[key];
+      if (key === "clear") {
+        toast.success(title, { description });
+      } else {
+        toast.warning(title, { description });
+      }
+    }, 1400);
   }
 
   return (
