@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useMemo } from "react";
+import { useSearchParams } from "next/navigation";
+import { useState, useMemo, useEffect } from "react";
 import {
   Briefcase,
   ArrowUpRight,
@@ -12,8 +13,19 @@ import {
   AlertCircle,
   TrendingDown,
   TrendingUp,
+  Loader,
+  CircleAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  listEmployees,
+  ApiError,
+  API_BASE_URL,
+  type Employee,
+  type Classification,
+} from "@/lib/api";
+
+const UPLOAD_ID_KEY = "upload_id";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,7 +37,13 @@ const FRAUD_TYPES = [
 ] as const;
 type FraudType = (typeof FRAUD_TYPES)[number];
 
-type CaseStatus = "Open" | "Under Review" | "Resolved";
+// Backend classification → display label for the existing status pill.
+const STATUS_LABEL: Record<Exclude<Classification, "VERIFIED">, "Open" | "Under Review"> = {
+  HIGH_RISK: "Open",
+  REVIEW_REQUIRED: "Under Review",
+};
+
+type CaseStatus = "Open" | "Under Review";
 
 interface Case {
   id: string;
@@ -34,31 +52,22 @@ interface Case {
   fraudType: FraudType;
   riskScore: number;
   status: CaseStatus;
-  assignedTo: string;
-  dateOpened: string;
 }
 
-// ─── Mock data ────────────────────────────────────────────────────────────────
-
-const CASES: Case[] = [
-  { id: "EMP-3821", name: "Ibrahim Musa", ministry: "Finance", fraudType: "Ghost Worker", riskScore: 97, status: "Open", assignedTo: "A. Okonkwo", dateOpened: "Apr 12, 2024" },
-  { id: "EMP-7143", name: "Tunde Fashola", ministry: "Health", fraudType: "Ghost Worker", riskScore: 95, status: "Under Review", assignedTo: "B. Adeleke", dateOpened: "Apr 10, 2024" },
-  { id: "EMP-1189", name: "Kola Balogun", ministry: "Health", fraudType: "Ghost Worker", riskScore: 91, status: "Open", assignedTo: "A. Okonkwo", dateOpened: "Apr 14, 2024" },
-  { id: "EMP-2205", name: "Ngozi Eze", ministry: "Education", fraudType: "Duplicate Identity", riskScore: 88, status: "Under Review", assignedTo: "C. Nwosu", dateOpened: "Apr 9, 2024" },
-  { id: "EMP-5912", name: "Emeka Obi", ministry: "Agriculture", fraudType: "Duplicate Identity", riskScore: 85, status: "Open", assignedTo: "B. Adeleke", dateOpened: "Apr 15, 2024" },
-  { id: "EMP-4438", name: "Bola Ahmed", ministry: "Works", fraudType: "Salary Fraud", riskScore: 79, status: "Under Review", assignedTo: "D. Sule", dateOpened: "Apr 8, 2024" },
-  { id: "EMP-6674", name: "Yemi Lawal", ministry: "Interior", fraudType: "Network Fraud", riskScore: 76, status: "Resolved", assignedTo: "C. Nwosu", dateOpened: "Apr 3, 2024" },
-  { id: "EMP-9012", name: "Chioma Nwosu", ministry: "Finance", fraudType: "Salary Fraud", riskScore: 72, status: "Open", assignedTo: "D. Sule", dateOpened: "Apr 16, 2024" },
-  { id: "EMP-8347", name: "Funke Akindele", ministry: "Education", fraudType: "Network Fraud", riskScore: 68, status: "Resolved", assignedTo: "A. Okonkwo", dateOpened: "Apr 1, 2024" },
-  { id: "EMP-3056", name: "Ade Sankore", ministry: "Works", fraudType: "Salary Fraud", riskScore: 63, status: "Resolved", assignedTo: "B. Adeleke", dateOpened: "Mar 28, 2024" },
-];
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function inferFraudType(employee: Employee): FraudType {
+  const types = new Set((employee.red_flags ?? []).map((f) => f.type));
+  if (types.has("BIOMETRIC")) return "Ghost Worker";
+  if (types.has("NETWORK")) return "Network Fraud";
+  if (types.has("SALARY")) return "Salary Fraud";
+  if (types.has("ATTENDANCE")) return "Ghost Worker";
+  return "Duplicate Identity";
+}
 
 const STATUS_CONFIG: Record<CaseStatus, { icon: React.ComponentType<{ className?: string }>; cls: string }> = {
   Open: { icon: AlertCircle, cls: "bg-gb-danger/10 text-gb-danger ring-1 ring-gb-danger/25" },
   "Under Review": { icon: Clock, cls: "bg-orange-500/10 text-orange-400 ring-1 ring-orange-500/25" },
-  Resolved: { icon: CheckCircle2, cls: "bg-gb-success/10 text-gb-success ring-1 ring-gb-success/25" },
 };
 
 const FRAUD_PILL: Record<FraudType, string> = {
@@ -76,18 +85,92 @@ function riskBadge(score: number) {
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
+type LoadState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; cases: Case[] }
+  | { kind: "error"; message: string };
+
 export default function CasesPage() {
+  const searchParams = useSearchParams();
+  const [uploadId, setUploadId] = useState<string | null>(null);
+  const [state, setState] = useState<LoadState>({ kind: "idle" });
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState<FraudType | "All">("All");
   const [filterStatus, setFilterStatus] = useState<CaseStatus | "All">("All");
   const [sortDesc, setSortDesc] = useState(true);
 
-  const openCount = CASES.filter((c) => c.status === "Open").length;
-  const reviewCount = CASES.filter((c) => c.status === "Under Review").length;
-  const resolvedCount = CASES.filter((c) => c.status === "Resolved").length;
+  useEffect(() => {
+    const fromUrl = searchParams.get("upload_id");
+    if (fromUrl) {
+      setUploadId(fromUrl);
+      return;
+    }
+    try {
+      const stored = window.localStorage.getItem(UPLOAD_ID_KEY);
+      if (stored) setUploadId(stored);
+    } catch {
+      /* storage unavailable */
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!uploadId) return;
+    let cancelled = false;
+    setState({ kind: "loading" });
+
+    (async () => {
+      try {
+        // No flaggedOnly param on the backend — fetch a large page and
+        // filter client-side. 500 is the backend's max page_size.
+        const res = await listEmployees(uploadId, {
+          page: 1,
+          page_size: 500,
+          sort_by: "fraud_score",
+          sort_desc: true,
+        });
+        if (cancelled) return;
+
+        const cases: Case[] = res.employees
+          .filter((e) => e.classification !== "VERIFIED")
+          .map((e) => ({
+            id: e.id,
+            name: e.name || "—",
+            ministry: (e.ministry || "").replace(/^Ministry of\s+/i, "").replace(/^Min\.\s+of\s+/i, ""),
+            fraudType: inferFraudType(e),
+            riskScore: Math.round(e.fraud_score),
+            status: STATUS_LABEL[e.classification as Exclude<Classification, "VERIFIED">],
+          }));
+
+        setState({ kind: "ready", cases });
+      } catch (err) {
+        if (cancelled) return;
+        const message =
+          err instanceof ApiError
+            ? err.status === 0
+              ? `Could not reach backend at ${API_BASE_URL}.`
+              : `${err.status}: ${err.detail}`
+            : err instanceof Error
+              ? err.message
+              : "Failed to load cases.";
+        setState({ kind: "error", message });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [uploadId]);
+
+  // ── Derived data ──────────────────────────────────────────────────────────
+
+  const cases = state.kind === "ready" ? state.cases : [];
+
+  const openCount = cases.filter((c) => c.status === "Open").length;
+  const reviewCount = cases.filter((c) => c.status === "Under Review").length;
 
   const rows = useMemo(() => {
-    let base = CASES;
+    let base = cases;
     if (filterType !== "All") base = base.filter((c) => c.fraudType === filterType);
     if (filterStatus !== "All") base = base.filter((c) => c.status === filterStatus);
     if (search.trim()) {
@@ -102,7 +185,51 @@ export default function CasesPage() {
     return [...base].sort((a, b) =>
       sortDesc ? b.riskScore - a.riskScore : a.riskScore - b.riskScore
     );
-  }, [filterType, filterStatus, search, sortDesc]);
+  }, [cases, filterType, filterStatus, search, sortDesc]);
+
+  // ── Render branches ───────────────────────────────────────────────────────
+
+  if (!uploadId) {
+    return (
+      <div className="min-h-full bg-gb-bg px-4 py-12 sm:px-8">
+        <div className="mx-auto max-w-xl rounded-2xl border border-white/[0.08] bg-white/[0.03] p-8 text-center space-y-4">
+          <h1 className="text-lg font-semibold text-white">No analysis selected</h1>
+          <p className="text-sm text-gb-muted">
+            Upload a payroll CSV to see flagged cases.
+          </p>
+          <Link
+            href="/upload"
+            className="inline-flex items-center justify-center rounded-xl bg-gb-accent px-5 py-2.5 text-sm font-semibold text-gb-bg hover:brightness-110"
+          >
+            Go to Upload
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (state.kind === "loading") {
+    return (
+      <div className="flex min-h-full items-center justify-center bg-gb-bg p-8">
+        <div className="flex items-center gap-3 text-sm text-gb-muted">
+          <Loader className="h-4 w-4 animate-spin text-gb-accent" />
+          Loading cases…
+        </div>
+      </div>
+    );
+  }
+
+  if (state.kind === "error") {
+    return (
+      <div className="min-h-full bg-gb-bg px-4 py-12 sm:px-8">
+        <div className="mx-auto max-w-xl rounded-2xl border border-gb-danger/25 bg-gb-danger/5 p-8 text-center space-y-4">
+          <CircleAlert className="mx-auto h-8 w-8 text-gb-danger" />
+          <h1 className="text-lg font-semibold text-white">Failed to load cases</h1>
+          <p className="text-sm text-gb-muted break-words">{state.message}</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-full bg-gb-bg px-4 py-6 space-y-7 sm:px-8 sm:py-10">
@@ -122,16 +249,12 @@ export default function CasesPage() {
           <span className="rounded-full bg-orange-500/10 px-3 py-1 text-xs font-bold text-orange-400">
             {reviewCount} Under Review
           </span>
-          <span className="rounded-full bg-gb-success/10 px-3 py-1 text-xs font-bold text-gb-success">
-            {resolvedCount} Resolved
-          </span>
         </div>
       </div>
 
       {/* ── Filter / search bar ───────────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-3">
 
-        {/* Search */}
         <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 min-w-[200px]">
           <Search className="h-3.5 w-3.5 shrink-0 text-gb-muted" />
           <input
@@ -142,7 +265,6 @@ export default function CasesPage() {
           />
         </div>
 
-        {/* Fraud type filter */}
         <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2">
           <ListFilter className="h-3.5 w-3.5 text-gb-muted" />
           <select
@@ -157,7 +279,6 @@ export default function CasesPage() {
           </select>
         </div>
 
-        {/* Status filter */}
         <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2">
           <Briefcase className="h-3.5 w-3.5 text-gb-muted" />
           <select
@@ -166,13 +287,12 @@ export default function CasesPage() {
             className="bg-transparent text-sm text-white outline-none cursor-pointer"
           >
             <option value="All" className="bg-[#0D1426]">All Statuses</option>
-            {(["Open", "Under Review", "Resolved"] as CaseStatus[]).map((s) => (
+            {(["Open", "Under Review"] as CaseStatus[]).map((s) => (
               <option key={s} value={s} className="bg-[#0D1426]">{s}</option>
             ))}
           </select>
         </div>
 
-        {/* Sort */}
         <button
           type="button"
           onClick={() => setSortDesc((d) => !d)}
@@ -189,10 +309,10 @@ export default function CasesPage() {
 
       {/* ── Cases table ──────────────────────────────────────────────────────── */}
       <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] overflow-hidden overflow-x-auto">
-        <table className="w-full min-w-[760px] text-sm">
+        <table className="w-full min-w-[640px] text-sm">
           <thead>
             <tr className="border-b border-white/[0.08]">
-              {["Employee", "Ministry", "Fraud Type", "Risk Score", "Status", "Assigned To", "Opened", "Action"].map((h) => (
+              {["Employee", "Ministry", "Fraud Type", "Risk Score", "Status", "Action"].map((h) => (
                 <th
                   key={h}
                   className="px-5 py-3.5 text-left text-[10px] font-semibold uppercase tracking-widest text-gb-muted"
@@ -214,16 +334,11 @@ export default function CasesPage() {
                     i === rows.length - 1 && "border-none"
                   )}
                 >
-                  {/* Employee */}
                   <td className="px-5 py-4">
                     <p className="font-medium text-white">{c.name}</p>
-                    <p className="mt-0.5 font-mono text-xs text-gb-muted">{c.id}</p>
+                    <p className="mt-0.5 font-mono text-xs text-gb-muted">{c.id.slice(0, 8)}</p>
                   </td>
-
-                  {/* Ministry */}
-                  <td className="px-5 py-4 text-white/70">Min. of {c.ministry}</td>
-
-                  {/* Fraud type */}
+                  <td className="px-5 py-4 text-white/70">{c.ministry ? `Min. of ${c.ministry}` : "—"}</td>
                   <td className="px-5 py-4">
                     <span
                       className={cn(
@@ -234,8 +349,6 @@ export default function CasesPage() {
                       {c.fraudType}
                     </span>
                   </td>
-
-                  {/* Risk score */}
                   <td className="px-5 py-4">
                     <span
                       className={cn(
@@ -246,25 +359,15 @@ export default function CasesPage() {
                       {c.riskScore}
                     </span>
                   </td>
-
-                  {/* Status */}
                   <td className="px-5 py-4">
                     <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium", status.cls)}>
                       <StatusIcon className="h-3 w-3" />
                       {c.status}
                     </span>
                   </td>
-
-                  {/* Assigned to */}
-                  <td className="px-5 py-4 text-white/70 text-xs">{c.assignedTo}</td>
-
-                  {/* Date opened */}
-                  <td className="px-5 py-4 text-white/50 text-xs">{c.dateOpened}</td>
-
-                  {/* Action */}
                   <td className="px-5 py-4">
                     <Link
-                      href={`/case/${c.id}`}
+                      href={`/case/${c.id}?upload_id=${encodeURIComponent(uploadId)}`}
                       className="inline-flex items-center gap-1 rounded-lg border border-gb-accent/25 bg-gb-accent/10 px-3 py-1.5 text-xs font-semibold text-gb-accent transition-colors hover:bg-gb-accent/20"
                     >
                       View
@@ -279,7 +382,9 @@ export default function CasesPage() {
 
         {rows.length === 0 && (
           <div className="py-16 text-center text-gb-muted text-sm">
-            No cases match the selected filters.
+            {cases.length === 0
+              ? "No flagged cases — payroll is clean."
+              : "No cases match the selected filters."}
           </div>
         )}
       </div>

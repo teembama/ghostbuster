@@ -8,10 +8,12 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from typing import Dict, List
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 
 from app.models.schemas import UploadResponse
+from app.services import analysis_store
 from app.services.database_service import db
 from app.services.fraud_detector import FraudDetector
 from app.utils.csv_parser import parser
@@ -19,6 +21,12 @@ from app.utils.csv_parser import parser
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/upload", tags=["upload"])
+
+# In-memory handoff between the upload request and the background analysis task.
+# Keyed by upload_id; the entry is popped when run_analysis claims it. This
+# lets the upload endpoint return without any Supabase writes for employee
+# rows — those land later in the background.
+employee_cache: Dict[str, List[Dict]] = {}
 
 
 @router.post("", response_model=UploadResponse)
@@ -56,8 +64,16 @@ async def upload_csv(
 
     for emp in employees:
         emp["id"] = str(uuid.uuid4())
+        emp["upload_id"] = upload_id
 
-    await db.save_employees(upload_id, employees)
+    # Hand the parsed rows to the background task in memory. Saving the
+    # employee rows to Supabase is deferred to run_analysis, so the upload
+    # response returns without a 10k-row insert in the request path.
+    employee_cache[upload_id] = employees
+
+    # Mark processing in the in-memory store so a poll right after upload sees
+    # the correct state without waiting for the background task to start.
+    analysis_store.set_processing(upload_id)
 
     # Run analysis in the background; the client polls /status for completion.
     background_tasks.add_task(run_analysis, upload_id)
@@ -102,26 +118,27 @@ def run_analysis(upload_id: str) -> None:
     endpoint sees a terminal state rather than hanging in 'processing'.
     """
     try:
-        # Pull all employees for this upload (sync call — we're in a worker thread).
-        # Equivalent to `await db.get_employees(upload_id)` but doesn't need an
-        # event loop since FastAPI runs sync background tasks in a threadpool.
-        response = (
-            db.client.table("employees")
-            .select("*")
-            .eq("upload_id", upload_id)
-            .execute()
-        )
-        employees_list = response.data or []
+        # Fast path: the upload handler stashed the parsed rows in memory.
+        # Fallback: if the cache is missing (process restart, replay, etc.)
+        # try Supabase — only useful if save_employees ran for this upload
+        # in a previous lifecycle.
+        employees_list = employee_cache.pop(upload_id, None)
+        if not employees_list:
+            logger.info("Cache miss for upload %s; falling back to DB read", upload_id)
+            employees_list = db._select_all(
+                "employees", eq={"upload_id": upload_id}
+            )
 
         if not employees_list:
             logger.warning("No employees found for upload %s", upload_id)
             db.client.table("uploads").update({"status": "failed"}).eq(
                 "id", upload_id
             ).execute()
+            analysis_store.set_failed(upload_id, "no employees found")
             return
 
-        # Run fraud detection. FraudDetector.analyze takes the raw list of
-        # employee dicts and returns {employees, summary, fraud_breakdown}.
+        # Run fraud detection on the in-memory rows. FraudDetector.analyze
+        # returns {employees (with scored fields), summary, fraud_breakdown}.
         detector = FraudDetector()
         results = detector.analyze(employees_list)
 
@@ -129,25 +146,55 @@ def run_analysis(upload_id: str) -> None:
         summary = results.get("summary") or {}
         fraud_breakdown = results.get("fraud_breakdown") or {}
 
-        # --- Update each employee row with new fraud_score/classification/red_flags ---
-        # Done individually so one bad row doesn't abort the whole batch.
+        # Normalize red_flags: FraudDetector leaves it as None for rows that
+        # weren't flagged, but the DB column rejects nulls in some setups.
+        for emp in scored_employees:
+            if emp.get("red_flags") is None:
+                emp["red_flags"] = []
+
+        # --- Persist employee rows to Supabase ---
+        # Deferred from the upload handler so the request returned fast.
+        # save_employees uses bulk INSERT in chunks of 1000; the upsert below
+        # then guarantees the scored fields are written even if a future
+        # schema change makes some scored columns omitted from the insert.
+        try:
+            db.save_employees(upload_id, scored_employees)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to save employees for upload %s; upsert below may "
+                "insert from scratch if no rows exist yet",
+                upload_id,
+            )
+
+        # --- Bulk-upsert scored fields ---
+        # Keeps the score-write path resilient: if save_employees succeeded
+        # this updates the same rows; if save_employees partially failed it
+        # fills the gap (upsert = insert on conflict-update).
+        updates = []
         for emp in scored_employees:
             emp_id = emp.get("id")
             if not emp_id:
                 logger.warning("Skipping scored employee with no id: %s", emp)
                 continue
-            try:
-                db.client.table("employees").update(
-                    {
-                        "fraud_score": emp.get("fraud_score", 0),
-                        "classification": emp.get("classification", "VERIFIED"),
-                        "red_flags": emp.get("red_flags") or [],
-                    }
-                ).eq("id", emp_id).execute()
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Failed to update employee %s for upload %s", emp_id, upload_id
-                )
+            updates.append({
+                "id": emp_id,
+                "upload_id": upload_id,
+                "fraud_score": emp.get("fraud_score", 0),
+                "classification": emp.get("classification", "VERIFIED"),
+                "red_flags": emp.get("red_flags") or [],
+            })
+
+        if updates:
+            chunk_size = 500
+            for i in range(0, len(updates), chunk_size):
+                chunk = updates[i:i + chunk_size]
+                try:
+                    db.client.table("employees").upsert(chunk).execute()
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Failed to bulk update employees chunk %d for upload %s",
+                        i // chunk_size, upload_id
+                    )
 
         # --- Insert aggregate analysis_results row ---
         try:
@@ -171,10 +218,16 @@ def run_analysis(upload_id: str) -> None:
         db.client.table("uploads").update({"status": "completed"}).eq(
             "id", upload_id
         ).execute()
+        analysis_store.set_complete(upload_id)
         logger.info("Analysis completed for upload %s", upload_id)
 
     except Exception as exc:  # noqa: BLE001 — we want any failure to mark the upload
         logger.exception("Analysis failed for upload %s: %s", upload_id, exc)
+        analysis_store.set_failed(upload_id, str(exc))
+        # Defensive: if the cache entry survived past the pop (shouldn't,
+        # but a thrown exception before the pop call would leave it),
+        # drop it so the dict doesn't grow unbounded under repeated failure.
+        employee_cache.pop(upload_id, None)
         try:
             db.client.table("uploads").update({"status": "failed"}).eq(
                 "id", upload_id

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: ghostbuster-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: MOCK_SQUAD
+        value: true
+      - key: ALLOWED_ORIGINS
+        value: "*"

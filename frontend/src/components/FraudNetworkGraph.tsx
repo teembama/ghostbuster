@@ -315,7 +315,8 @@ export default function FraudNetworkGraph() {
   return (
     <div
       style={{
-        height: 500,
+        width: "100%",
+        height: "100vh",
         borderRadius: 16,
         overflow: "hidden",
         border: "1px solid rgba(255,255,255,0.08)",
@@ -332,6 +333,11 @@ export default function FraudNetworkGraph() {
         fitViewOptions={{ padding: 0.18 }}
         minZoom={0.4}
         maxZoom={2}
+        zoomOnScroll={false}
+        zoomOnPinch={true}
+        panOnScroll={false}
+        panOnDrag={true}
+        preventScrolling={false}
         proOptions={{ hideAttribution: true }}
         style={{ background: "#0A0F1E" }}
       >

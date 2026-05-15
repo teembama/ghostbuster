@@ -74,11 +74,11 @@ async def list_employees(
             ),
         )
 
-    # Fetch all employees for this upload from Supabase.
-    response = (
-        db.client.table("employees").select("*").eq("upload_id", upload_id).execute()
+    # Fetch all employees for this upload — paginated to bypass Supabase's
+    # 1000-row response cap. Filter/sort/page happen below in Python.
+    employees: List[Dict[str, Any]] = db._select_all(
+        "employees", eq={"upload_id": upload_id}
     )
-    employees: List[Dict[str, Any]] = response.data or []
 
     # Apply classification filter in Python (cheap; we already have the rows).
     if classification is not None:

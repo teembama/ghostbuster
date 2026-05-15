@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import {
   Ghost,
   CloudUpload,
@@ -17,6 +18,12 @@ import {
   CircleCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { uploadPayroll, getAnalysisResults } from "@/lib/api";
+import { friendlyApiError, friendlyUploadError } from "@/lib/errors";
+
+const UPLOAD_ID_KEY = "upload_id";
+const PROCESSING_KEY = "ghostbuster_processing";
+const POLL_INTERVAL_MS = 2_000;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -65,9 +72,19 @@ function estimateRows(bytes: number): number {
   return Math.max(1, Math.round(bytes / 82));
 }
 
+function clearProcessingFromStorage() {
+  try {
+    window.localStorage.removeItem(PROCESSING_KEY);
+    window.localStorage.removeItem(UPLOAD_ID_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function UploadPage() {
+  const router = useRouter();
   const [phase, setPhase] = useState<Phase>("idle");
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,14 +94,102 @@ export default function UploadPage() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Cleanup: clear both timers on unmount. Without this they keep firing on
+  // a dead component when the user navigates away.
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
   }, []);
 
+  // Start the fake progress tick — drives the 0→98% bar at 80ms intervals,
+  // step thresholds at 25% increments. Kept identical to the original UX.
+  const startProgressTick = useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    setProgress(0);
+    setCurrentStep(0);
+    timerRef.current = setInterval(() => {
+      setProgress((prev) => {
+        const next = Math.min(prev + 0.7, 98);
+        setCurrentStep(Math.min(3, Math.floor(next / 25)));
+        return next;
+      });
+    }, 80);
+  }, []);
+
+  // Single poll: 202 means keep polling (interval will call us again), 200
+  // means analysis is done — clear interval, clear processing flag, navigate.
+  const pollForResults = useCallback(
+    async (uploadId: string) => {
+      const res = await getAnalysisResults(uploadId);
+      if ("status" in res && res.status === "processing") {
+        return; // still processing, interval will call again
+      }
+      // It's a real AnalysisResult — done.
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      try {
+        window.localStorage.removeItem(PROCESSING_KEY);
+      } catch {
+        /* storage unavailable */
+      }
+      router.push(`/results?upload_id=${encodeURIComponent(uploadId)}`);
+    },
+    [router],
+  );
+
+  // Kick off a 2s interval for the given upload_id. Idempotent: if an interval
+  // is already running, it's cleared first. Errors during a poll tick are
+  // caught here (not inside pollForResults) so the body stays as specified.
+  const startPolling = useCallback(
+    (uploadId: string) => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+
+      const safeTick = () => {
+        pollForResults(uploadId).catch((err) => {
+          if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+          if (timerRef.current) clearInterval(timerRef.current);
+          clearProcessingFromStorage();
+          setError(friendlyApiError(err));
+          setPhase("error");
+        });
+      };
+
+      pollIntervalRef.current = setInterval(safeTick, POLL_INTERVAL_MS);
+      // Run one immediate poll so a sub-2-second analysis doesn't wait out
+      // a full interval before the user gets navigated.
+      safeTick();
+    },
+    [pollForResults],
+  );
+
+  // Mount resume: if a previous tab/visit left a processing flag in storage,
+  // jump straight back into the analyzing UI and resume polling. The progress
+  // tick restarts from 0 — it's cosmetic, the source of truth is the poll.
+  useEffect(() => {
+    let storedId: string | null = null;
+    let processing: string | null = null;
+    try {
+      processing = window.localStorage.getItem(PROCESSING_KEY);
+      storedId = window.localStorage.getItem(UPLOAD_ID_KEY);
+    } catch {
+      return;
+    }
+    if (!processing || !storedId) return;
+
+    setPhase("analyzing");
+    startProgressTick();
+    startPolling(storedId);
+    // Intentionally empty deps: this is a one-shot resume on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const resetState = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    clearProcessingFromStorage();
     setFile(null);
     setPhase("idle");
     setError(null);
@@ -127,36 +232,27 @@ export default function UploadPage() {
   const startAnalysis = async () => {
     if (!file) return;
     setPhase("analyzing");
-    setProgress(0);
-    setCurrentStep(0);
-
-    // Drive a smooth progress bar; step thresholds at 25% increments
-    timerRef.current = setInterval(() => {
-      setProgress((prev) => {
-        const next = Math.min(prev + 0.7, 98);
-        setCurrentStep(Math.min(3, Math.floor(next / 25)));
-        return next;
-      });
-    }, 80);
+    setError(null);
+    startProgressTick();
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        body: formData,
-      });
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const response = await uploadPayroll(file);
 
-      clearInterval(timerRef.current!);
-      setProgress(100);
-      setCurrentStep(3);
-      setPhase("done");
+      // Persist so a refresh / nav-away brings the user back to this same
+      // analyzing UI on the next mount.
+      try {
+        window.localStorage.setItem(UPLOAD_ID_KEY, response.upload_id);
+        window.localStorage.setItem(PROCESSING_KEY, "true");
+      } catch {
+        /* storage unavailable */
+      }
+
+      // Don't navigate yet — poll until analysis is actually done.
+      startPolling(response.upload_id);
     } catch (err) {
-      clearInterval(timerRef.current!);
-      setError(
-        err instanceof Error ? err.message : "Analysis failed. Please retry."
-      );
+      if (timerRef.current) clearInterval(timerRef.current);
+      clearProcessingFromStorage();
+      setError(friendlyUploadError(err));
       setPhase("error");
     }
   };
@@ -341,7 +437,7 @@ export default function UploadPage() {
         {error && phase !== "analyzing" && (
           <div className="flex items-start gap-3 rounded-xl border border-gb-danger/20 bg-gb-danger/10 px-4 py-3">
             <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-gb-danger" />
-            <p className="text-sm text-gb-danger">{error}</p>
+            <p className="text-sm text-gb-danger break-words">{error}</p>
           </div>
         )}
 

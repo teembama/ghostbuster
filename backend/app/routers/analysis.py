@@ -19,6 +19,7 @@ from app.models.schemas import (
     FraudBreakdown,
     NetworkGraphData,
 )
+from app.services import analysis_store
 from app.services.database_service import db
 from app.services.network_builder import build_network_graph
 
@@ -72,11 +73,28 @@ def _row_to_employee(record: Dict[str, Any]) -> Employee:
 async def get_analysis_results(upload_id: str):
     """Return the full analysis payload for an upload.
 
-    If the analysis hasn't finished yet (no row in `analysis_results`), returns
-    HTTP 202 with `{"status": "processing"}` so the client knows to keep polling.
+    Status resolution order:
+      1. In-memory analysis_store (fast path; survives until process restart).
+      2. Presence of an `analysis_results` row in the DB (survives restart).
+
+    Returns HTTP 202 + {"status": "processing"} while running; HTTP 500 +
+    error detail on failure; HTTP 200 + AnalysisResult when complete.
     """
+    state = analysis_store.get(upload_id)
+    if state is not None:
+        if state["status"] == "processing":
+            return JSONResponse(status_code=202, content={"status": "processing"})
+        if state["status"] == "failed":
+            return JSONResponse(
+                status_code=500,
+                content={"status": "failed", "error": state.get("error", "unknown")},
+            )
+        # status == "complete" — fall through to DB read below.
+
     analysis_row = await db.get_analysis_result(upload_id)
     if not analysis_row:
+        # No store entry and no DB row — either unknown upload or background
+        # task hasn't started yet. Treat as processing so the client polls.
         return JSONResponse(status_code=202, content={"status": "processing"})
 
     # Pull every employee for this upload to populate the response.
