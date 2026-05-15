@@ -338,6 +338,10 @@ export default function FraudNetworkGraph() {
         panOnScroll={false}
         panOnDrag={true}
         preventScrolling={false}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        edgesFocusable={false}
+        elementsSelectable={false}
         proOptions={{ hideAttribution: true }}
         style={{ background: "#0A0F1E" }}
       >

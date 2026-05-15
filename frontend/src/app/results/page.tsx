@@ -153,7 +153,7 @@ export default function ResultsPage() {
   const [state, setState] = useState<LoadState>({ kind: "idle" });
   const [filterType, setFilterType] = useState<FraudType | "All">("All");
   const [sortDesc, setSortDesc] = useState(true);
-  const [dryRun, setDryRun] = useState(true);
+  const [showDisburseConfirm, setShowDisburseConfirm] = useState(false);
   const [disburse, setDisburse] = useState<DisburseState>({ kind: "idle" });
 
   // Pull upload_id from URL, fall back to localStorage so a direct nav to
@@ -207,8 +207,12 @@ export default function ResultsPage() {
   const data = state.kind === "ready" ? state.data : null;
 
   const employees = data?.employees ?? [];
+  // Single source of truth: a "flagged" employee is classified HIGH_RISK.
+  // Used by the KPI card, bar chart, table, and CSV downloads so all four
+  // surfaces agree. REVIEW_REQUIRED is intentionally excluded — those are
+  // not actionable as fraud cases.
   const flaggedEmployees = useMemo(
-    () => employees.filter((e) => e.classification !== "VERIFIED"),
+    () => employees.filter((e) => e.classification === "HIGH_RISK"),
     [employees],
   );
 
@@ -223,19 +227,38 @@ export default function ResultsPage() {
     ];
   }, [data]);
 
-  // Group flagged-by-ministry from employees list (top 8 by count).
+  // Fraud rate per ministry as a percentage: flagged / total for that
+  // ministry. Top 8 by rate so the chart highlights the worst offenders.
+  // Ministries with <5 employees are dropped to avoid noisy 100% bars.
   const barData = useMemo(() => {
-    if (flaggedEmployees.length === 0) return [];
-    const counts = new Map<string, number>();
-    for (const emp of flaggedEmployees) {
-      const m = (emp.ministry || "Unknown").replace(/^Ministry of\s+/i, "").replace(/^Min\.\s+of\s+/i, "");
-      counts.set(m, (counts.get(m) ?? 0) + 1);
+    if (employees.length === 0) return [];
+    const totals = new Map<string, number>();
+    const flagged = new Map<string, number>();
+    const normalize = (raw: string | null | undefined) =>
+      (raw || "Unknown")
+        .replace(/^Ministry of\s+/i, "")
+        .replace(/^Min\.\s+of\s+/i, "");
+
+    for (const emp of employees) {
+      const m = normalize(emp.ministry);
+      totals.set(m, (totals.get(m) ?? 0) + 1);
+      if (emp.classification === "HIGH_RISK") {
+        flagged.set(m, (flagged.get(m) ?? 0) + 1);
+      }
     }
-    return Array.from(counts.entries())
-      .map(([ministry, flagged]) => ({ ministry, flagged }))
-      .sort((a, b) => b.flagged - a.flagged)
+
+    const MIN_MINISTRY_SIZE = 5;
+    return Array.from(totals.entries())
+      .filter(([, total]) => total >= MIN_MINISTRY_SIZE)
+      .map(([ministry, total]) => ({
+        ministry,
+        fraudRate: Number(((flagged.get(ministry) ?? 0) / total * 100).toFixed(1)),
+        flaggedCount: flagged.get(ministry) ?? 0,
+        total,
+      }))
+      .sort((a, b) => b.fraudRate - a.fraudRate)
       .slice(0, 8);
-  }, [flaggedEmployees]);
+  }, [employees]);
 
   type Row = {
     id: string;
@@ -245,41 +268,60 @@ export default function ResultsPage() {
     riskScore: number;
   };
 
-  const rows: Row[] = useMemo(() => {
-    const mapped: Row[] = flaggedEmployees.map((e) => ({
-      id: e.id,
-      name: e.name,
-      ministry: (e.ministry || "").replace(/^Ministry of\s+/i, "").replace(/^Min\.\s+of\s+/i, ""),
-      fraudType: inferFraudType(e),
-      riskScore: Math.round(e.fraud_score),
-    }));
-    const base = filterType === "All" ? mapped : mapped.filter((r) => r.fraudType === filterType);
-    return base.sort((a, b) => (sortDesc ? b.riskScore - a.riskScore : a.riskScore - b.riskScore));
+  // Raw employees in the same order the table renders them — filter +
+  // sort applied. Used both for the table rows below and the Download
+  // Table button so the CSV exactly matches what the user is seeing.
+  const displayedEmployees = useMemo(() => {
+    const base =
+      filterType === "All"
+        ? flaggedEmployees
+        : flaggedEmployees.filter((e) => inferFraudType(e) === filterType);
+    return [...base].sort((a, b) =>
+      sortDesc ? b.fraud_score - a.fraud_score : a.fraud_score - b.fraud_score,
+    );
   }, [flaggedEmployees, filterType, sortDesc]);
+
+  const rows: Row[] = useMemo(
+    () =>
+      displayedEmployees.map((e) => ({
+        id: e.id,
+        name: e.name,
+        ministry: (e.ministry || "")
+          .replace(/^Ministry of\s+/i, "")
+          .replace(/^Min\.\s+of\s+/i, ""),
+        fraudType: inferFraudType(e),
+        riskScore: Math.round(e.fraud_score),
+      })),
+    [displayedEmployees],
+  );
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
-  const handleDownloadReport = () => {
-    if (!uploadId || flaggedEmployees.length === 0) return;
-    const rows: string[][] = [
-      ["id", "name", "ministry", "salary", "classification", "fraud_score"],
-      ...flaggedEmployees.map((e) => [
+  const handleDownloadTable = () => {
+    if (!uploadId || displayedEmployees.length === 0) return;
+    const csvRows: string[][] = [
+      ["id", "name", "ministry", "salary", "classification", "fraud_score", "fraud_type"],
+      ...displayedEmployees.map((e) => [
         e.id,
         e.name,
         e.ministry,
         String(e.salary),
         e.classification,
         String(e.fraud_score),
+        e.red_flags?.[0]?.type ?? "UNKNOWN",
       ]),
     ];
-    downloadCSV(`ghostbuster-report-${uploadId}.csv`, rows);
+    downloadCSV(`ghostbuster-filtered-${uploadId}.csv`, csvRows);
   };
 
-  const handleDisburse = async () => {
+  const handleDisburseConfirm = async () => {
     if (!uploadId) return;
+    setShowDisburseConfirm(false);
     setDisburse({ kind: "loading" });
     try {
-      const result = await disburseSalaries(uploadId, dryRun);
+      // Live disbursement — backend filters to VERIFIED employees only and
+      // skips HIGH_RISK / REVIEW_REQUIRED automatically.
+      const result = await disburseSalaries(uploadId, false);
       setDisburse({ kind: "success", result });
     } catch (err) {
       setDisburse({ kind: "error", message: friendlyApiError(err) });
@@ -334,8 +376,15 @@ export default function ResultsPage() {
   if (!data) return <ResultsSkeleton />;
 
   const totalEmployees = data.total_employees;
-  const flaggedCount = data.flagged_count;
-  const cleanCount = Math.max(0, totalEmployees - flaggedCount);
+  // Derive flagged count from the same filter the rest of the page uses,
+  // not from the backend's `flagged_count` field — those can diverge if
+  // the backend definition changes. Verified count is the complement.
+  const flaggedCount = flaggedEmployees.length;
+  const verifiedCount = employees.filter((e) => e.classification === "VERIFIED").length;
+  const cleanCount = verifiedCount;
+  const verifiedTotalPay = employees
+    .filter((e) => e.classification === "VERIFIED")
+    .reduce((sum, e) => sum + (e.salary || 0), 0);
   const estimatedLoss = data.estimated_loss;
 
   return (
@@ -354,44 +403,11 @@ export default function ResultsPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Download Report — CSV of all flagged employees */}
+          {/* Disburse — opens confirm dialog, posts live (no dry run) on confirm */}
           <button
             type="button"
-            onClick={handleDownloadReport}
-            disabled={flaggedEmployees.length === 0}
-            className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Download className="h-4 w-4" />
-            Download Report
-          </button>
-
-          {/* Dry Run toggle */}
-          <label className="inline-flex select-none items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 text-xs font-medium text-gb-muted">
-            <span>Dry Run</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={dryRun}
-              onClick={() => setDryRun((v) => !v)}
-              className={cn(
-                "relative h-5 w-9 rounded-full transition-colors",
-                dryRun ? "bg-gb-accent" : "bg-white/15",
-              )}
-            >
-              <span
-                className={cn(
-                  "absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all",
-                  dryRun ? "left-[18px]" : "left-0.5",
-                )}
-              />
-            </button>
-          </label>
-
-          {/* Disburse — calls /api/squad/disburse/{upload_id} */}
-          <button
-            type="button"
-            onClick={handleDisburse}
-            disabled={disburse.kind === "loading"}
+            onClick={() => setShowDisburseConfirm(true)}
+            disabled={disburse.kind === "loading" || verifiedCount === 0}
             className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-gb-success px-5 py-2.5 text-sm font-semibold text-[#0A0F1E] transition-all hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {disburse.kind === "loading" ? (
@@ -400,14 +416,73 @@ export default function ResultsPage() {
               <ShieldCheck className="h-4 w-4" />
             )}
             <span className="hidden sm:inline">
-              Disburse to Verified ({cleanCount.toLocaleString()})
+              Disburse to Verified ({verifiedCount.toLocaleString()})
             </span>
             <span className="sm:hidden">
-              Disburse ({cleanCount.toLocaleString()})
+              Disburse ({verifiedCount.toLocaleString()})
             </span>
           </button>
         </div>
       </div>
+
+      {/* ── Disburse confirmation dialog ──────────────────────────────────── */}
+      {showDisburseConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="disburse-confirm-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+          onClick={() => setShowDisburseConfirm(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-white/[0.08] bg-gb-sidebar p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gb-success/10">
+                <ShieldCheck className="h-5 w-5 text-gb-success" />
+              </div>
+              <h2 id="disburse-confirm-title" className="text-base font-semibold text-white">
+                Confirm Disbursement
+              </h2>
+            </div>
+
+            <p className="mb-4 text-sm text-gb-muted">
+              Disburse{" "}
+              <span className="font-semibold text-white">
+                ₦{verifiedTotalPay.toLocaleString()}
+              </span>{" "}
+              to{" "}
+              <span className="font-semibold text-white">
+                {verifiedCount.toLocaleString()} verified employees
+              </span>
+              ?
+            </p>
+            <p className="mb-6 text-xs text-gb-muted">
+              Only VERIFIED employees will receive funds. High-risk and
+              review-required records are skipped automatically. This action
+              cannot be undone.
+            </p>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDisburseConfirm(false)}
+                className="rounded-lg border border-white/10 px-4 py-2 text-sm font-medium text-white/80 transition-colors hover:bg-white/5"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDisburseConfirm}
+                className="rounded-lg bg-gb-success px-4 py-2 text-sm font-semibold text-[#0A0F1E] transition-all hover:brightness-110 active:scale-[0.98]"
+              >
+                Confirm Disburse
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Disburse result banner ────────────────────────────────────────── */}
       {disburse.kind === "success" && (
@@ -416,7 +491,6 @@ export default function ResultsPage() {
           <p className="text-sm text-gb-success">
             {disburse.result.successful}/{disburse.result.total} transfers
             successful — ₦{disburse.result.total_amount_naira.toLocaleString()} disbursed
-            {disburse.result.dry_run && <span className="ml-1 opacity-80">(Dry Run)</span>}
           </p>
         </div>
       )}
@@ -512,18 +586,20 @@ export default function ResultsPage() {
 
         {/* Bar chart */}
         <div className="col-span-1 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-6 lg:col-span-3">
-          <p className="text-sm font-semibold text-white">Flagged by Ministry</p>
-          <p className="mt-0.5 text-xs text-gb-muted">Records requiring investigation</p>
+          <p className="text-sm font-semibold text-white">Fraud Rate by Ministry</p>
+          <p className="mt-0.5 text-xs text-gb-muted">
+            Percentage of high-risk employees per ministry
+          </p>
           <div className="mt-4 h-64">
             {barData.length === 0 ? (
               <div className="flex h-full items-center justify-center text-sm text-gb-muted">
-                No flagged records to chart.
+                Not enough data to chart fraud rates.
               </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart
                   data={barData}
-                  margin={{ top: 4, right: 4, bottom: 0, left: -16 }}
+                  margin={{ top: 4, right: 4, bottom: 0, left: 4 }}
                   barCategoryGap="30%"
                 >
                   <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.06)" />
@@ -535,12 +611,52 @@ export default function ResultsPage() {
                     tickLine={false}
                   />
                   <YAxis
+                    domain={[0, 100]}
                     tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 11 }}
+                    tickFormatter={(v) => `${v}%`}
                     axisLine={false}
                     tickLine={false}
+                    label={{
+                      value: "Fraud Rate (%)",
+                      angle: -90,
+                      position: "insideLeft",
+                      offset: 10,
+                      style: { fill: "rgba(255,255,255,0.45)", fontSize: 11, textAnchor: "middle" },
+                    }}
                   />
-                  <Tooltip content={<ChartTooltip />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
-                  <Bar dataKey="flagged" fill="#FF3B5C" radius={[4, 4, 0, 0]} name="Flagged" />
+                  <Tooltip
+                    cursor={{ fill: "rgba(255,255,255,0.04)" }}
+                    content={({ active, payload, label }) => {
+                      if (!active || !payload?.length) return null;
+                      const row = payload[0].payload as {
+                        ministry: string;
+                        fraudRate: number;
+                        flaggedCount: number;
+                        total: number;
+                      };
+                      return (
+                        <div className="rounded-xl border border-white/10 bg-[#0D1426] px-4 py-3 shadow-xl">
+                          <p className="mb-1.5 text-xs font-semibold text-white/60">
+                            {label ?? row.ministry}
+                          </p>
+                          <p className="text-sm font-semibold text-gb-danger">
+                            Fraud Rate:{" "}
+                            <span className="text-white">{row.fraudRate.toFixed(1)}%</span>
+                          </p>
+                          <p className="text-xs text-white/60">
+                            {row.flaggedCount.toLocaleString()} of{" "}
+                            {row.total.toLocaleString()} employees flagged
+                          </p>
+                        </div>
+                      );
+                    }}
+                  />
+                  <Bar
+                    dataKey="fraudRate"
+                    fill="#FF3B5C"
+                    radius={[4, 4, 0, 0]}
+                    name="Fraud Rate"
+                  />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -586,9 +702,20 @@ export default function ResultsPage() {
           Risk Score: {sortDesc ? "Highest first" : "Lowest first"}
         </button>
 
-        <span className="ml-auto text-xs text-gb-muted">
-          Showing {rows.length} of {flaggedCount.toLocaleString()} flagged records
-        </span>
+        <div className="ml-auto flex items-center gap-3">
+          <span className="text-xs text-gb-muted">
+            Showing {rows.length} of {flaggedCount.toLocaleString()} flagged records
+          </span>
+          <button
+            type="button"
+            onClick={handleDownloadTable}
+            disabled={rows.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Download Table
+          </button>
+        </div>
       </div>
 
       {/* ── Flagged employees table ───────────────────────────────────────────── */}
