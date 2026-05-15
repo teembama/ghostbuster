@@ -142,13 +142,18 @@ async def verify_account(account_number: str, bank_code: str) -> Dict[str, Any]:
 async def _query_transfer_status(
     client: httpx.AsyncClient, transaction_reference: str
 ) -> Optional[str]:
-    """GET /payout/transfer/{ref} once and return the transaction_status string."""
-    url = f"{settings.squad_base_url}/payout/transfer/{transaction_reference}"
+    """POST /payout/requery once and return the transaction_status string.
+
+    Per Squad's docs, after a 424 you re-query via POST /payout/requery with
+    the transaction_reference in the body — not a GET on /payout/transfer/{ref}.
+    """
+    url = f"{settings.squad_base_url}/payout/requery"
+    payload = {"transaction_reference": transaction_reference}
     try:
-        response = await client.get(url, headers=_auth_headers())
+        response = await client.post(url, json=payload, headers=_auth_headers())
         if response.status_code != 200:
             logger.warning(
-                "Squad transfer status non-200: ref=%s status=%s body=%s",
+                "Squad transfer requery non-200: ref=%s status=%s body=%s",
                 transaction_reference,
                 response.status_code,
                 response.text[:500],
@@ -159,7 +164,7 @@ async def _query_transfer_status(
         return data.get("transaction_status")
     except (httpx.HTTPError, ValueError, KeyError):
         logger.exception(
-            "Squad transfer status query failed for ref=%s", transaction_reference
+            "Squad transfer requery failed for ref=%s", transaction_reference
         )
         return None
 
