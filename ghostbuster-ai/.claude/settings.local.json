@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(New-Item -ItemType File -Path \"c:\\\\Users\\\\HP\\\\ghostbuster\\\\ghostbuster-ai\\\\data_generator.py\" -Force)",
+      "Bash(Out-Null)",
+      "Bash(touch c:\\\\Users\\\\HP\\\\ghostbuster\\\\ghostbuster-ai\\\\fraud_detector.py)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\HP\\ghostbuster\\ghostbuster-ai"
+    ]
+  }
+}
