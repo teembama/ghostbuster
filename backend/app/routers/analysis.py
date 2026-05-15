@@ -8,27 +8,23 @@ Exposes:
 import json
 import logging
 from datetime import datetime
-from itertools import combinations
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from app.models.schemas import (
     AnalysisResult,
     Employee,
     FraudBreakdown,
-    NetworkEdge,
     NetworkGraphData,
-    NetworkNode,
 )
 from app.services.database_service import db
+from app.services.network_builder import build_network_graph
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
-
-MAX_GRAPH_NODES = 150
 
 
 def _coerce_fraud_breakdown(raw: Any) -> FraudBreakdown:
@@ -122,83 +118,10 @@ async def get_analysis_results(upload_id: str):
 
 @router.get("/graph/{upload_id}", response_model=NetworkGraphData)
 async def get_network_graph(upload_id: str) -> NetworkGraphData:
-    """Build a fraud-relationship network from flagged employees.
+    """Build a fraud-relationship network from flagged employees via Person 3's builder."""
+    employees = await db.get_employees(upload_id, flagged_only=True)
 
-    Nodes: every employee with classification != VERIFIED.
-    Edges:
-      * shared_account   — pairs sharing the same bank_account.
-      * shared_biometric — pairs sharing the same biometric_id.
-
-    Capped at 150 nodes (highest fraud_score first). Edges between dropped
-    nodes are also dropped so the graph stays internally consistent.
-    """
-    employee_rows = await db.get_employees(upload_id, flagged_only=True)
-
-    if not employee_rows:
+    if not employees:
         return NetworkGraphData(nodes=[], edges=[])
 
-    # Sort by fraud_score desc and cap to the highest-risk MAX_GRAPH_NODES.
-    employee_rows.sort(
-        key=lambda r: float(r.get("fraud_score") or 0),
-        reverse=True,
-    )
-    capped_rows = employee_rows[:MAX_GRAPH_NODES]
-    kept_ids = {str(r["id"]) for r in capped_rows}
-
-    nodes: List[NetworkNode] = [
-        NetworkNode(
-            id=str(row["id"]),
-            name=row.get("name", "") or "",
-            type="employee",
-            fraud_score=float(row.get("fraud_score") or 0),
-            ministry=row.get("ministry", "") or "",
-        )
-        for row in capped_rows
-    ]
-
-    # Group kept employees by bank_account and biometric_id to find shared keys.
-    bank_groups: Dict[str, List[str]] = {}
-    biometric_groups: Dict[str, List[str]] = {}
-
-    for row in capped_rows:
-        emp_id = str(row["id"])
-
-        bank = row.get("bank_account")
-        if bank is not None and str(bank).strip() != "":
-            bank_groups.setdefault(str(bank).strip(), []).append(emp_id)
-
-        bio = row.get("biometric_id")
-        if bio is not None and str(bio).strip() != "":
-            biometric_groups.setdefault(str(bio).strip(), []).append(emp_id)
-
-    edges: List[NetworkEdge] = []
-    seen_edges: set = set()  # dedupe undirected pairs per edge type
-
-    def _add_edge(a: str, b: str, edge_type: str) -> None:
-        if a == b:
-            return
-        if a not in kept_ids or b not in kept_ids:
-            return
-        # Canonicalize ordering so (A,B) and (B,A) collapse.
-        lo, hi = (a, b) if a < b else (b, a)
-        key = (lo, hi, edge_type)
-        if key in seen_edges:
-            return
-        seen_edges.add(key)
-        edges.append(
-            NetworkEdge(source=lo, target=hi, type=edge_type, weight=1.0)  # type: ignore[arg-type]
-        )
-
-    for ids in bank_groups.values():
-        if len(ids) < 2:
-            continue
-        for a, b in combinations(ids, 2):
-            _add_edge(a, b, "shared_account")
-
-    for ids in biometric_groups.values():
-        if len(ids) < 2:
-            continue
-        for a, b in combinations(ids, 2):
-            _add_edge(a, b, "shared_biometric")
-
-    return NetworkGraphData(nodes=nodes, edges=edges)
+    return build_network_graph([dict(e) for e in employees])
