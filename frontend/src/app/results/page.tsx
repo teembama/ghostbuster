@@ -3,6 +3,7 @@
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useState, useMemo } from "react";
+import { toast } from "sonner";
 import {
   ResponsiveContainer,
   PieChart,
@@ -158,6 +159,11 @@ export default function ResultsPage() {
         </div>
         <button
           type="button"
+          onClick={() =>
+            toast.success("Disbursement initiated", {
+              description: `₦ payment queued for ${SUMMARY.clean.toLocaleString()} verified employees via Squad.`,
+            })
+          }
           className="flex shrink-0 items-center justify-center gap-2 rounded-xl bg-gb-success px-5 py-2.5 text-sm font-semibold text-[#0A0F1E] transition-all hover:brightness-110 active:scale-[0.98]"
         >
           <ShieldCheck className="h-4 w-4" />

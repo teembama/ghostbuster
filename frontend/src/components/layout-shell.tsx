@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Activity, Menu } from "lucide-react";
+import { Toaster } from "sonner";
 import { Sidebar } from "./sidebar";
 import { HeaderDate } from "./header-date";
 
@@ -60,6 +61,18 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
 
         <main className="flex-1 overflow-y-auto">{children}</main>
       </div>
+
+      <Toaster
+        theme="dark"
+        position="bottom-right"
+        toastOptions={{
+          style: {
+            background: "#0D1426",
+            border: "1px solid rgba(255,255,255,0.08)",
+            color: "#fff",
+          },
+        }}
+      />
     </>
   );
 }
