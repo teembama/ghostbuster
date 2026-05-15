@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     squad_base_url: str = "https://sandbox-api-d.squadco.com"
     environment: str = "development"
     allowed_origins: list[str] = ["http://localhost:3000"]
+    mock_squad: bool = True
     
     class Config:
         env_file = ".env"
