@@ -293,7 +293,7 @@ export default function CasePage() {
   }
 
   return (
-    <div className="min-h-full bg-gb-bg px-8 py-10">
+    <div className="min-h-full bg-gb-bg px-4 py-6 sm:px-8 sm:py-10">
       {/* Back nav */}
       <Link
         href="/results"

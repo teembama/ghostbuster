@@ -105,17 +105,17 @@ export default function CasesPage() {
   }, [filterType, filterStatus, search, sortDesc]);
 
   return (
-    <div className="min-h-full bg-gb-bg px-8 py-10 space-y-7">
+    <div className="min-h-full bg-gb-bg px-4 py-6 space-y-7 sm:px-8 sm:py-10">
 
       {/* ── Header ───────────────────────────────────────────────────────────── */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-white">Case Management</h1>
           <p className="mt-1 text-sm text-gb-muted">
             Track and investigate flagged employee cases
           </p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-full bg-gb-danger/10 px-3 py-1 text-xs font-bold text-gb-danger">
             {openCount} Open
           </span>
@@ -188,8 +188,8 @@ export default function CasesPage() {
       </div>
 
       {/* ── Cases table ──────────────────────────────────────────────────────── */}
-      <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] overflow-hidden overflow-x-auto">
+        <table className="w-full min-w-[760px] text-sm">
           <thead>
             <tr className="border-b border-white/[0.08]">
               {["Employee", "Ministry", "Fraud Type", "Risk Score", "Status", "Assigned To", "Opened", "Action"].map((h) => (
