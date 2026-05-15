@@ -1,5 +1,4 @@
 import pandas as pd
-import time
 from fraud_detector import FraudDetector
 from network_builder import build_network_graph, get_largest_fraud_ring
 
@@ -10,15 +9,13 @@ print(f"Testing with {len(employees)} employees...")
 
 detector = FraudDetector()
 
-start = time.time()
 results = detector.analyze(employees)
-duration = time.time() - start
 
-print(f"Analysis completed in {duration:.2f} seconds")
+print(f"Analysis completed in {results['summary']['analysis_duration_seconds']:.2f} seconds")
 
 print("\n=== FRAUD DETECTION RESULTS ===")
-print(f"Flagged employees:    {results['flagged_count']}")
-print(f"Estimated annual loss: ₦{results['estimated_loss']:,}")
+print(f"Flagged employees:     {results['summary']['flagged_count']}")
+print(f"Estimated annual loss: ₦{results['summary']['estimated_loss']:,}")
 print("\nFraud breakdown:")
 for fraud_type, count in results["fraud_breakdown"].items():
     print(f"  {fraud_type}: {count}")

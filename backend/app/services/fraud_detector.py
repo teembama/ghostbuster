@@ -1,3 +1,4 @@
+import time
 import pandas as pd
 from typing import List, Dict
 
@@ -103,6 +104,7 @@ class FraudDetector:
         return "VERIFIED"
 
     def analyze(self, employees: List[Dict]) -> Dict:
+        start = time.time()
         df = pd.DataFrame(employees)
 
         df["fraud_score"] = self.calculate_fraud_score(df)
@@ -124,9 +126,14 @@ class FraudDetector:
             "network_fraud": int(self.detect_network_fraud(df).sum()),
         }
 
+        duration = round(time.time() - start, 2)
+
         return {
-            "flagged_count": int(flagged_count),
-            "estimated_loss": estimated_loss,
+            "summary": {
+                "flagged_count": int(flagged_count),
+                "estimated_loss": estimated_loss,
+                "analysis_duration_seconds": duration,
+            },
             "fraud_breakdown": fraud_breakdown,
             "employees": df.to_dict(orient="records"),
         }
