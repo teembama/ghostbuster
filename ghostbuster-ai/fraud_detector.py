@@ -9,7 +9,7 @@ class FraudDetector:
 
     def detect_duplicate_identities(self, df: pd.DataFrame) -> pd.Series:
         counts = df["biometric_id"].value_counts()
-        return df["biometric_id"].map(counts).fillna(0) >= 3
+        return df["biometric_id"].map(counts).fillna(0) >= 2
 
     def detect_salary_fraud(self, df: pd.DataFrame) -> pd.Series:
         dates = pd.to_datetime(df["employment_date"])
@@ -115,7 +115,7 @@ class FraudDetector:
             df.at[idx, "red_flags"] = self.generate_red_flags(df.loc[idx], df)
 
         flagged_count = flagged_mask.sum()
-        estimated_loss = int(pd.to_numeric(df.loc[flagged_mask, "salary"], errors="coerce").clip(upper=500000).sum() * 12)
+        estimated_loss = int(pd.to_numeric(df.loc[flagged_mask, "salary"], errors="coerce").clip(upper=300000).sum() * 12)
 
         fraud_breakdown = {
             "ghost_workers": int(self.detect_ghost_workers(df).sum()),

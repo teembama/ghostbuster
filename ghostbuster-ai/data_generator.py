@@ -49,10 +49,19 @@ def generate_clean_employee():
         "salary": random.randint(80000, 500000),
         "bank_account": str(random.randint(1000000000, 9999999999)),
         "bank_name": random.choice(["GTBank", "Zenith", "Access", "UBA", "First Bank"]),
-        "biometric_id": f"BIO_{random.randint(10000, 99999)}",
+        "biometric_id": None,
         "attendance_rate": round(random.uniform(85.0, 98.0), 2),
         "employment_date": fake.date_between(start_date="-10y", end_date="-1y").isoformat(),
     }
+
+
+def generate_clean_employees(count):
+    employees = []
+    for i in range(count):
+        emp = generate_clean_employee()
+        emp["biometric_id"] = f"BIO_{str(i + 1).zfill(5)}"
+        employees.append(emp)
+    return employees
 
 
 def inject_ghost_workers(employees, count):
@@ -86,6 +95,7 @@ def inject_salary_fraud(employees, count):
     today = datetime.today().date()
     for _ in range(count):
         emp = generate_clean_employee()
+        emp["biometric_id"] = f"BIO_{random.randint(10000, 99999)}"
         emp["salary"] = random.randint(900000, 1500000)
         emp["employment_date"] = fake.date_between(start_date="-1y", end_date=today).isoformat()
         employees.append(emp)
@@ -104,6 +114,7 @@ def inject_network_fraud(employees, count):
             if generated >= count:
                 break
             emp = generate_clean_employee()
+            emp["biometric_id"] = f"BIO_{random.randint(10000, 99999)}"
             emp["bank_account"] = shared_account
             emp["bank_name"] = shared_bank
             emp["ministry"] = shared_ministry
@@ -113,14 +124,25 @@ def inject_network_fraud(employees, count):
         size_idx += 1
 
 
-def generate_full_dataset(total_employees=10000, fraud_rate=0.0847):
-    clean_count = total_employees - int(total_employees * fraud_rate)
-    employees = [generate_clean_employee() for _ in range(clean_count)]
+def generate_full_dataset(total_employees=10000):
+    ghost_count = 312
+    dupe_count = 198
+    salary_count = 156
+    network_count = 181
+    clean_count = total_employees - (ghost_count + dupe_count + salary_count + network_count)
 
-    inject_ghost_workers(employees, int(total_employees * 0.031))
-    inject_duplicate_identities(employees, int(total_employees * 0.020))
-    inject_salary_fraud(employees, int(total_employees * 0.016))
-    inject_network_fraud(employees, int(total_employees * 0.018))
+    employees = generate_clean_employees(clean_count)
+
+    inject_ghost_workers(employees, ghost_count)
+    inject_duplicate_identities(employees, dupe_count)
+    inject_salary_fraud(employees, salary_count)
+    inject_network_fraud(employees, network_count)
+
+    if len(employees) > total_employees:
+        employees = employees[:total_employees]
+    elif len(employees) < total_employees:
+        pad = generate_clean_employees(total_employees - len(employees))
+        employees.extend(pad)
 
     random.shuffle(employees)
 
@@ -140,5 +162,7 @@ if __name__ == "__main__":
     df.to_csv("generated_data/synthetic_payroll.csv", index=False)
 
     ghost_count = df["biometric_id"].isna().sum()
-    print(f"Total employees generated: {len(df)}")
-    print(f"Ghost workers (no biometric): {ghost_count}")
+    fraud_count = 312 + 198 + 156 + 181
+    print(f"Total employees generated:      {len(df)}")
+    print(f"Ghost workers (biometric=None): {ghost_count}  (expected 312)")
+    print(f"Total fraud injected:           {fraud_count}  (expected 847)")
