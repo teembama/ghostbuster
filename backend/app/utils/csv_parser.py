@@ -59,6 +59,21 @@ class CSVParser:
         
         # Convert to dict
         employees = df.to_dict(orient="records")
+
+        import math
+
+        # Clean NaN values - Supabase can't serialize them
+        def clean_nan(val):
+            if isinstance(val, float) and math.isnan(val):
+                return None
+            return val
+
+        employees = [
+            {k: clean_nan(v) for k, v in emp.items()}
+            for emp in employees
+        ]
         return employees
+
+        # return employees
 
 parser = CSVParser()

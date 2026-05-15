@@ -12,14 +12,25 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter
 
+from pydantic import BaseModel
 from app.models.schemas import (
     AccountLookupRequest,
     AccountLookupResponse,
-    TransferRequest,
-    TransferResponse,
 )
 from app.services import squad_service
 from app.services.database_service import db
+
+
+class DisburseRequest(BaseModel):
+    dry_run: bool = True
+
+class DisburseResponse(BaseModel):
+    total: int
+    successful: int
+    failed: int
+    total_amount_naira: float
+    transactions: list
+    dry_run: bool
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +64,10 @@ async def verify_account_endpoint(payload: AccountLookupRequest) -> AccountLooku
     return AccountLookupResponse(**result)
 
 
-@router.post("/disburse/{upload_id}", response_model=TransferResponse)
+@router.post("/disburse/{upload_id}", response_model=DisburseResponse)
 async def disburse_salaries(
-    upload_id: str, payload: TransferRequest
-) -> TransferResponse:
+    upload_id: str, payload: DisburseRequest
+) -> DisburseResponse:
     """Disburse salaries to all VERIFIED employees for an upload.
 
     On dry_run (default), no Squad calls are made — the response simulates
@@ -70,7 +81,7 @@ async def disburse_salaries(
     if not verified:
         # Empty result is a valid 200 — caller may legitimately have nothing
         # to disburse. Return zeros rather than 404'ing.
-        return TransferResponse(
+        return DisburseResponse(
             total=0,
             successful=0,
             failed=0,
@@ -170,7 +181,7 @@ async def disburse_salaries(
     failed = len(transactions) - successful
     total_amount = sum(t["amount_naira"] for t in transactions if t["success"])
 
-    return TransferResponse(
+    return DisburseResponse(
         total=len(transactions),
         successful=successful,
         failed=failed,
