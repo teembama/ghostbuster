@@ -16,7 +16,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import get_settings
 from app.routers import analysis, employees, squad, upload
-from app.services.database_service import db
 
 # --- Logging setup --------------------------------------------------------
 # Configure root logger once at import time so every module that does
@@ -129,15 +128,11 @@ async def root():
 
 @app.get("/api/health")
 async def health_check():
-    """Liveness + dependency check.
-
-    Pings Supabase with a trivial SELECT. If that fails we return a 'degraded'
-    payload (still HTTP 200 — useful for load balancers that want detail).
-    """
     try:
+        from app.services.database_service import db
         db.client.table("uploads").select("id").limit(1).execute()
         database_status = "connected"
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Health check: Supabase ping failed: %s", exc)
         return {"status": "degraded", "database": "error"}
 
