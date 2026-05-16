@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, Suspense } from "react";
 import {
   Briefcase,
   ArrowUpRight,
@@ -92,6 +92,14 @@ type LoadState =
   | { kind: "error"; message: string };
 
 export default function CasesPage() {
+  return (
+    <Suspense>
+      <CasesPageInner />
+    </Suspense>
+  );
+}
+
+function CasesPageInner() {
   const searchParams = useSearchParams();
   const [uploadId, setUploadId] = useState<string | null>(null);
   const [state, setState] = useState<LoadState>({ kind: "idle" });
