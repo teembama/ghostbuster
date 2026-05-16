@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import dynamic from "next/dynamic";
 
 const FraudNetworkGraph = dynamic(
@@ -223,6 +223,14 @@ type LoadState =
   | { kind: "error"; message: string };
 
 export default function CasePage() {
+  return (
+    <Suspense>
+      <CasePageInner />
+    </Suspense>
+  );
+}
+
+function CasePageInner() {
   const params = useParams();
   const searchParams = useSearchParams();
   const id = params?.id as string | undefined;

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useSearchParams, useRouter } from "next/navigation";
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, Suspense } from "react";
 import {
   ResponsiveContainer,
   PieChart,
@@ -147,6 +147,14 @@ type DisburseState =
   | { kind: "error"; message: string };
 
 export default function ResultsPage() {
+  return (
+    <Suspense>
+      <ResultsPageInner />
+    </Suspense>
+  );
+}
+
+function ResultsPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [uploadId, setUploadId] = useState<string | null>(null);
