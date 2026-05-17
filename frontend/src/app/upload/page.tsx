@@ -91,6 +91,8 @@ export default function UploadPage() {
   const [dragOver, setDragOver] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentStep, setCurrentStep] = useState(0);
+  // Populated from uploadPayroll response; null until the upload completes.
+  const [uploadTotalRows, setUploadTotalRows] = useState<number | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -237,6 +239,7 @@ export default function UploadPage() {
 
     try {
       const response = await uploadPayroll(file);
+      setUploadTotalRows(response.total_rows);
 
       // Persist so a refresh / nav-away brings the user back to this same
       // analyzing UI on the next mount.
@@ -449,8 +452,9 @@ export default function UploadPage() {
               <div>
                 <p className="font-semibold text-white">AI Analysis Running</p>
                 <p className="mt-0.5 text-sm text-gb-muted">
-                  Processing&ensp;~{rowCount.toLocaleString()}&ensp;employee
-                  records…
+                  Processing&ensp;
+                  {(uploadTotalRows ?? rowCount).toLocaleString()}
+                  &ensp;employee records…
                 </p>
               </div>
               <span className="font-mono text-2xl font-bold text-gb-accent tabular-nums">

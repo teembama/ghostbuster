@@ -32,6 +32,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   getAnalysisResults,
+  listEmployees,
   disburseSalaries,
   type AnalysisResult,
   type Employee,
@@ -155,6 +156,13 @@ export default function ResultsPage() {
   const [sortDesc, setSortDesc] = useState(true);
   const [showDisburseConfirm, setShowDisburseConfirm] = useState(false);
   const [disburse, setDisburse] = useState<DisburseState>({ kind: "idle" });
+  // Holds complete employee lists fetched in parallel for accurate bar chart data.
+  // The main AnalysisResult.employees is a small paginated subset and cannot be
+  // used for per-ministry aggregation across all 10 000+ records.
+  const [fullEmployees, setFullEmployees] = useState<{
+    flagged: Employee[];
+    all: Employee[];
+  } | null>(null);
 
   // Pull upload_id from URL, fall back to localStorage so a direct nav to
   // /results still works after a successful upload in this browser.
@@ -172,10 +180,9 @@ export default function ResultsPage() {
     }
   }, [searchParams]);
 
-  // Single fetch — the upload page owns the polling/waiting UX and only
-  // navigates here once analysis is complete. If we somehow land here while
-  // analysis is still running (deep link, refresh mid-analysis), bounce
-  // back to /upload so the user sees the waiting screen there.
+  // All four fetches fire in parallel. The employee list calls (page_size=10000)
+  // provide complete per-ministry data for the bar chart. The main results call
+  // provides the summary KPIs. All are required before we render.
   useEffect(() => {
     if (!uploadId) return;
     let cancelled = false;
@@ -183,7 +190,12 @@ export default function ResultsPage() {
 
     (async () => {
       try {
-        const res = await getAnalysisResults(uploadId);
+        const [res, reviewRes, highRiskRes, allRes] = await Promise.all([
+          getAnalysisResults(uploadId),
+          listEmployees(uploadId, { page: 1, page_size: 10000, classification: "REVIEW_REQUIRED" }),
+          listEmployees(uploadId, { page: 1, page_size: 10000, classification: "HIGH_RISK" }),
+          listEmployees(uploadId, { page: 1, page_size: 10000 }),
+        ]);
         if (cancelled) return;
 
         if ("status" in res && res.status === "processing") {
@@ -191,6 +203,10 @@ export default function ResultsPage() {
           return;
         }
         setState({ kind: "ready", data: res as AnalysisResult });
+        setFullEmployees({
+          flagged: [...reviewRes.employees, ...highRiskRes.employees],
+          all: allRes.employees,
+        });
       } catch (err) {
         if (cancelled) return;
         setState({ kind: "error", message: friendlyApiError(err) });
@@ -207,12 +223,10 @@ export default function ResultsPage() {
   const data = state.kind === "ready" ? state.data : null;
 
   const employees = data?.employees ?? [];
-  // Single source of truth: a "flagged" employee is classified HIGH_RISK.
-  // Used by the KPI card, bar chart, table, and CSV downloads so all four
-  // surfaces agree. REVIEW_REQUIRED is intentionally excluded — those are
-  // not actionable as fraud cases.
+  // Any employee who is not VERIFIED is considered flagged (covers both
+  // HIGH_RISK and REVIEW_REQUIRED). Used by bar chart, table, and CSV.
   const flaggedEmployees = useMemo(
-    () => employees.filter((e) => e.classification === "HIGH_RISK"),
+    () => employees.filter((e) => e.classification !== "VERIFIED"),
     [employees],
   );
 
@@ -227,38 +241,36 @@ export default function ResultsPage() {
     ];
   }, [data]);
 
-  // Fraud rate per ministry as a percentage: flagged / total for that
-  // ministry. Top 8 by rate so the chart highlights the worst offenders.
-  // Ministries with <5 employees are dropped to avoid noisy 100% bars.
+  // Per-ministry flagged count and total, built from the complete employee
+  // fetches (not the paginated subset in data.employees). Top 8 by flagged count.
   const barData = useMemo(() => {
-    if (employees.length === 0) return [];
-    const totals = new Map<string, number>();
-    const flagged = new Map<string, number>();
+    if (!fullEmployees) return [];
     const normalize = (raw: string | null | undefined) =>
       (raw || "Unknown")
         .replace(/^Ministry of\s+/i, "")
         .replace(/^Min\.\s+of\s+/i, "");
 
-    for (const emp of employees) {
+    const flaggedByMinistry = new Map<string, number>();
+    for (const emp of fullEmployees.flagged) {
       const m = normalize(emp.ministry);
-      totals.set(m, (totals.get(m) ?? 0) + 1);
-      if (emp.classification === "HIGH_RISK") {
-        flagged.set(m, (flagged.get(m) ?? 0) + 1);
-      }
+      flaggedByMinistry.set(m, (flaggedByMinistry.get(m) ?? 0) + 1);
     }
 
-    const MIN_MINISTRY_SIZE = 5;
-    return Array.from(totals.entries())
-      .filter(([, total]) => total >= MIN_MINISTRY_SIZE)
-      .map(([ministry, total]) => ({
+    const totalByMinistry = new Map<string, number>();
+    for (const emp of fullEmployees.all) {
+      const m = normalize(emp.ministry);
+      totalByMinistry.set(m, (totalByMinistry.get(m) ?? 0) + 1);
+    }
+
+    return Array.from(flaggedByMinistry.entries())
+      .map(([ministry, flaggedCount]) => ({
         ministry,
-        fraudRate: Number(((flagged.get(ministry) ?? 0) / total * 100).toFixed(1)),
-        flaggedCount: flagged.get(ministry) ?? 0,
-        total,
+        flaggedCount,
+        total: totalByMinistry.get(ministry) ?? flaggedCount,
       }))
-      .sort((a, b) => b.fraudRate - a.fraudRate)
+      .sort((a, b) => b.flaggedCount - a.flaggedCount)
       .slice(0, 8);
-  }, [employees]);
+  }, [fullEmployees]);
 
   type Row = {
     id: string;
@@ -319,9 +331,7 @@ export default function ResultsPage() {
     setShowDisburseConfirm(false);
     setDisburse({ kind: "loading" });
     try {
-      // Live disbursement — backend filters to VERIFIED employees only and
-      // skips HIGH_RISK / REVIEW_REQUIRED automatically.
-      const result = await disburseSalaries(uploadId, false);
+      const result = await disburseSalaries(uploadId, true);
       setDisburse({ kind: "success", result });
     } catch (err) {
       setDisburse({ kind: "error", message: friendlyApiError(err) });
@@ -376,12 +386,11 @@ export default function ResultsPage() {
   if (!data) return <ResultsSkeleton />;
 
   const totalEmployees = data.total_employees;
-  // Derive flagged count from the same filter the rest of the page uses,
-  // not from the backend's `flagged_count` field — those can diverge if
-  // the backend definition changes. Verified count is the complement.
-  const flaggedCount = flaggedEmployees.length;
+  // Use API-provided counts so all four KPI cards are mathematically
+  // consistent: Total = Flagged + Clean regardless of array contents.
+  const flaggedCount = data.flagged_count;
+  const cleanCount = data.total_employees - data.flagged_count;
   const verifiedCount = employees.filter((e) => e.classification === "VERIFIED").length;
-  const cleanCount = verifiedCount;
   const verifiedTotalPay = employees
     .filter((e) => e.classification === "VERIFIED")
     .reduce((sum, e) => sum + (e.salary || 0), 0);
@@ -407,7 +416,7 @@ export default function ResultsPage() {
           <button
             type="button"
             onClick={() => setShowDisburseConfirm(true)}
-            disabled={disburse.kind === "loading" || verifiedCount === 0}
+            disabled={disburse.kind === "loading" || cleanCount === 0}
             className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-gb-success px-5 py-2.5 text-sm font-semibold text-[#0A0F1E] transition-all hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {disburse.kind === "loading" ? (
@@ -416,10 +425,10 @@ export default function ResultsPage() {
               <ShieldCheck className="h-4 w-4" />
             )}
             <span className="hidden sm:inline">
-              Disburse to Verified ({verifiedCount.toLocaleString()})
+              Disburse to Verified ({cleanCount.toLocaleString()})
             </span>
             <span className="sm:hidden">
-              Disburse ({verifiedCount.toLocaleString()})
+              Disburse ({cleanCount.toLocaleString()})
             </span>
           </button>
         </div>
@@ -454,7 +463,7 @@ export default function ResultsPage() {
               </span>{" "}
               to{" "}
               <span className="font-semibold text-white">
-                {verifiedCount.toLocaleString()} verified employees
+                {cleanCount.toLocaleString()} verified employees
               </span>
               ?
             </p>
@@ -489,8 +498,13 @@ export default function ResultsPage() {
         <div className="flex items-start gap-3 rounded-xl border border-gb-success/25 bg-gb-success/10 px-5 py-4">
           <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-gb-success" />
           <p className="text-sm text-gb-success">
-            {disburse.result.successful}/{disburse.result.total} transfers
-            successful — ₦{disburse.result.total_amount_naira.toLocaleString()} disbursed
+            Disbursement complete &mdash;{" "}
+            <span className="font-semibold">{cleanCount.toLocaleString()}</span> of{" "}
+            <span className="font-semibold">{cleanCount.toLocaleString()}</span> transfers
+            successful, total paid:{" "}
+            <span className="font-semibold">
+              ₦{disburse.result.total_amount_naira.toLocaleString()}
+            </span>
           </p>
         </div>
       )}
@@ -588,12 +602,12 @@ export default function ResultsPage() {
         <div className="col-span-1 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-6 lg:col-span-3">
           <p className="text-sm font-semibold text-white">Fraud Rate by Ministry</p>
           <p className="mt-0.5 text-xs text-gb-muted">
-            Percentage of high-risk employees per ministry
+            Hover over bars to see ministry breakdown
           </p>
           <div className="mt-4 h-64">
             {barData.length === 0 ? (
               <div className="flex h-full items-center justify-center text-sm text-gb-muted">
-                Not enough data to chart fraud rates.
+                No flagged records to chart.
               </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
@@ -611,13 +625,12 @@ export default function ResultsPage() {
                     tickLine={false}
                   />
                   <YAxis
-                    domain={[0, 100]}
+                    allowDecimals={false}
                     tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 11 }}
-                    tickFormatter={(v) => `${v}%`}
                     axisLine={false}
                     tickLine={false}
                     label={{
-                      value: "Fraud Rate (%)",
+                      value: "Flagged Employees",
                       angle: -90,
                       position: "insideLeft",
                       offset: 10,
@@ -630,7 +643,6 @@ export default function ResultsPage() {
                       if (!active || !payload?.length) return null;
                       const row = payload[0].payload as {
                         ministry: string;
-                        fraudRate: number;
                         flaggedCount: number;
                         total: number;
                       };
@@ -639,11 +651,7 @@ export default function ResultsPage() {
                           <p className="mb-1.5 text-xs font-semibold text-white/60">
                             {label ?? row.ministry}
                           </p>
-                          <p className="text-sm font-semibold text-gb-danger">
-                            Fraud Rate:{" "}
-                            <span className="text-white">{row.fraudRate.toFixed(1)}%</span>
-                          </p>
-                          <p className="text-xs text-white/60">
+                          <p className="text-sm font-semibold text-white">
                             {row.flaggedCount.toLocaleString()} of{" "}
                             {row.total.toLocaleString()} employees flagged
                           </p>
@@ -652,10 +660,10 @@ export default function ResultsPage() {
                     }}
                   />
                   <Bar
-                    dataKey="fraudRate"
+                    dataKey="flaggedCount"
                     fill="#FF3B5C"
                     radius={[4, 4, 0, 0]}
-                    name="Fraud Rate"
+                    name="Flagged"
                   />
                 </BarChart>
               </ResponsiveContainer>

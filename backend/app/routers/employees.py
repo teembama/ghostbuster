@@ -51,7 +51,7 @@ def _sort_key(employee: Dict[str, Any], field: str) -> Any:
 async def list_employees(
     upload_id: str,
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
+    page_size: int = Query(50, ge=1, le=12000),
     classification: Optional[str] = Query(None),
     sort_by: str = Query("fraud_score"),
     sort_desc: bool = Query(True),

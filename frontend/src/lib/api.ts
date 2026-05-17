@@ -140,8 +140,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${API_BASE_URL}${path}`, {
-      headers: { Accept: "application/json", ...init?.headers },
       ...init,
+      headers: { Accept: "application/json", ...init?.headers },
     });
   } catch (err) {
     // Network failure (server down, CORS, DNS, etc.) — fetch rejects rather
